@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Voice Stamp Cam 시연용</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body { background: #000; color: #fff; font-family: -apple-system, sans-serif; overflow: hidden; height: 100vh; width: 100vw; position: relative; }
+    
+    /* 카메라 뷰파인더 */
+    video { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; z-index: 1; }
+    
+    /* 상단 바 */
+    .top-bar { position: absolute; top: 20px; left: 20px; right: 20px; z-index: 10; display: flex; justify-content: space-between; align-items: center; }
+    .badge { background: rgba(0,0,0,0.6); padding: 8px 14px; border-radius: 20px; font-size: 13px; display: flex; align-items: center; gap: 8px; border: 1px solid rgba(255,255,255,0.2); }
+    input[type="checkbox"] { accent-color: #ffb300; width: 18px; height: 18px; }
+
+    /* 실시간 음성 프리뷰 박스 */
+    .preview-box { position: absolute; bottom: 140px; left: 20px; right: 20px; z-index: 10; background: rgba(0,0,0,0.7); padding: 16px; border-radius: 12px; border: 2px solid rgba(255,255,255,0.25); transition: 0.2s; }
+    .preview-box.listening { border-color: #ff5252; box-shadow: 0 0 15px rgba(255,82,82,0.5); }
+    .timestamp { font-size: 12px; color: #ccc; margin-bottom: 6px; }
+    .voice-text { font-size: 20px; font-weight: bold; color: #ffd740; word-break: keep-all; }
+
+    /* 하단 촬영/마이크 버튼 */
+    .bottom-bar { position: absolute; bottom: 35px; left: 0; right: 0; z-index: 10; display: flex; justify-content: center; align-items: center; }
+    .record-btn { width: 76px; height: 76px; border-radius: 50%; background: #ffb300; border: 4px solid #fff; display: flex; justify-content: center; align-items: center; font-size: 30px; cursor: pointer; transition: 0.15s; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .record-btn.active { width: 90px; height: 90px; background: #ff5252; box-shadow: 0 0 25px #ff5252; }
+
+    /* 결과 확인 및 수정 모달 */
+    .modal { position: absolute; inset: 0; background: rgba(0,0,0,0.92); z-index: 20; display: none; flex-direction: column; justify-content: center; align-items: center; padding: 20px; }
+    .modal.show { display: flex; }
+    .modal img { max-width: 100%; max-height: 55vh; border-radius: 8px; border: 1px solid #444; margin-bottom: 16px; }
+    .modal input { width: 100%; padding: 14px; font-size: 16px; border-radius: 8px; border: 1px solid #666; background: #222; color: #fff; margin-bottom: 12px; }
+    .btn-group { display: flex; gap: 10px; width: 100%; }
+    .btn { flex: 1; padding: 14px; font-size: 16px; font-weight: bold; border-radius: 8px; border: none; cursor: pointer; }
+    .btn-cancel { background: #444; color: #fff; }
+    .btn-save { background: #ffb300; color: #000; }
+  </style>
+</head>
+<body>
+
+  <!-- 카메라 화면 -->
+  <video id="video" autoplay playsinline></video>
+
+  <!-- 상단 옵션 -->
+  <div class="top-bar">
+    <label class="badge">
+      <input type="checkbox" id="autoSaveToggle">
+      <span>즉시 저장 모드</span>
+    </label>
+  </div>
+
+  <!-- 실시간 자막 프리뷰 -->
+  <div class="preview-box" id="previewBox">
+    <div class="timestamp" id="liveTime">2026.00.00 00:00</div>
+    <div class="voice-text" id="voiceText">아래 버튼을 누른 채로 말씀하세요</div>
+  </div>
+
+  <!-- 하단 촬영 버튼 -->
+  <div class="bottom-bar">
+    <div class="record-btn" id="recordBtn">🎙️</div>
+  </div>
+
+  <!-- 후보정 및 다운로드 모달 -->
+  <div class="modal" id="editModal">
+    <img id="resultImage" src="" alt="합성 미리보기">
+    <input type="text" id="editInput" placeholder="텍스트를 수정하세요">
+    <div class="btn-group">
+      <button class="btn btn-cancel" id="closeModalBtn">다시 찍기</button>
+      <button class="btn btn-save" id="downloadBtn">메모 적용 & 저장</button>
+    </div>
+  </div>
+
+  <!-- 숨겨진 합성용 캔버스 -->
+  <canvas id="canvas" style="display:none;"></canvas>
+
+  <script>
+    const video = document.getElementById('video');
+    const recordBtn = document.getElementById('recordBtn');
+    const previewBox = document.getElementById('previewBox');
+    const voiceTextEl = document.getElementById('voiceText');
+    const liveTimeEl = document.getElementById('liveTime');
+    const autoSaveToggle = document.getElementById('autoSaveToggle');
+    const editModal = document.getElementById('editModal');
+    const resultImage = document.getElementById('resultImage');
+    const editInput = document.getElementById('editInput');
+    const closeModalBtn = document.getElementById('closeModalBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const canvas = document.getElementById('canvas');
+
+    let recognizedMemo = '';
+    let isHolding = false;
+
+    // 1. 시계 업데이트
+    function getFormattedDate() {
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      return `${now.getFullYear()}.${pad(now.getMonth()+1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    }
+    setInterval(() => { liveTimeEl.innerText = getFormattedDate(); }, 1000);
+    liveTimeEl.innerText = getFormattedDate();
+
+    // 2. 후면 카메라 실행
+    async function initCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false
+        });
+        video.srcObject = stream;
+      } catch (err) {
+        alert("카메라 권한을 허용해주세요. (스마트폰에서는 https 주소로 접속해야 작동합니다)");
+      }
+    }
+    initCamera();
+
+    // 3. 한글 숫자 -> 아라비아 숫자 변환
+    function normalizeKoreanNumbers(str) {
+      const map = { '공':'0','영':'0','일':'1','이':'2','삼':'3','사':'4','오':'5','육':'6','칠':'7','팔':'8','구':'9','점':'.' };
+      return str.replace(/([공영일이삼사오육칠팔구점]+)(?=\s*(번|층|호|동|키로|개|박스))/g, match => {
+        return match.split('').map(ch => map[ch] || ch).join('');
+      });
+    }
+
+    // 4. Web Speech API 설정
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = SpeechRecognition ? new SpeechRecognition() : null;
+    if (recognition) {
+      recognition.lang = navigator.language || 'ko-KR';
+      recognition.interimResults = true;
+      recognition.continuous = true;
+
+      recognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = 0; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        recognizedMemo = normalizeKoreanNumbers(transcript.trim());
+        voiceTextEl.innerText = recognizedMemo || '듣고 있습니다...';
+      };
+    }
+
+    // 5. 원본 프레임 + 텍스트 Canvas 합성 함수
+    function renderMergedImage(customText) {
+      const width = video.videoWidth || 1080;
+      const height = video.videoHeight || 1920;
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+
+      // 현재 비디오 프레임 그리기 (후보정 재렌더링 시에는 기존 캡처 유지용으로 별도 처리 가능하지만 간단히 구현)
+      if (!editModal.classList.contains('show')) {
+        ctx.drawImage(video, 0, 0, width, height);
+        canvas.dataset.rawBg = canvas.toDataURL('image/jpeg', 0.95);
+      }
+
+      return new Promise((resolve) => {
+        const bgImg = new Image();
+        bgImg.onload = () => {
+          ctx.drawImage(bgImg, 0, 0, width, height);
+
+          // 하단 반투명 박스
+          const boxHeight = height * 0.16;
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+          ctx.fillRect(0, height - boxHeight, width, boxHeight);
+
+          // 날짜
+          const fontSizeDate = Math.round(width * 0.032);
+          ctx.font = `${fontSizeDate}px sans-serif`;
+          ctx.fillStyle = '#cccccc';
+          ctx.fillText(getFormattedDate(), 40, height - boxHeight + fontSizeDate + 24);
+
+          // 음성 메모 텍스트
+          const fontSizeMemo = Math.round(width * 0.055);
+          ctx.font = `bold ${fontSizeMemo}px sans-serif`;
+          ctx.fillStyle = '#ffd740';
+          const finalMemo = (customText || '기록 없음').trim();
+          ctx.fillText(finalMemo, 40, height - boxHeight + fontSizeDate + fontSizeMemo + 45);
+
+          resolve(canvas.toDataURL('image/jpeg', 0.92));
+        };
+        bgImg.src = canvas.dataset.rawBg;
+      });
+    }
+
+    // 6. 이미지 파일 다운로드(저장) 실행
+    function triggerDownload(dataUrl) {
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `voice_photo_${Date.now()}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    // 7. 버튼 누르기 / 떼기 이벤트 (모바일 터치 & PC 마우스 지원)
+    function startHold(e) {
+      e.preventDefault();
+      if (isHolding) return;
+      isHolding = true;
+      recognizedMemo = '';
+      recordBtn.classList.add('active');
+      previewBox.classList.add('listening');
+      voiceTextEl.innerText = '듣고 있습니다... 말씀하세요';
+      if (recognition) {
+        try { recognition.start(); } catch(err) {}
+      }
+    }
+
+    async function endHold(e) {
+      e.preventDefault();
+      if (!isHolding) return;
+      isHolding = false;
+      recordBtn.classList.remove('active');
+      previewBox.classList.remove('listening');
+      if (recognition) {
+        try { recognition.stop(); } catch(err) {}
+      }
+
+      // 음성 인식 마지막 글자가 들어올 수 있도록 0.4초 대기 후 캡처
+      setTimeout(async () => {
+        const finalText = recognizedMemo || '메모 없음';
+        voiceTextEl.innerText = finalText;
+        const mergedDataUrl = await renderMergedImage(finalText);
+
+        if (autoSaveToggle.checked) {
+          triggerDownload(mergedDataUrl);
+        } else {
+          resultImage.src = mergedDataUrl;
+          editInput.value = finalText === '메모 없음' ? '' : finalText;
+          editModal.classList.add('show');
+        }
+      }, 400);
+    }
+
+    recordBtn.addEventListener('touchstart', startHold, { passive: false });
+    recordBtn.addEventListener('touchend', endHold, { passive: false });
+    recordBtn.addEventListener('mousedown', startHold);
+    recordBtn.addEventListener('mouseup', endHold);
+
+    // 모달 버튼 이벤트
+    closeModalBtn.addEventListener('click', () => {
+      editModal.classList.remove('show');
+      voiceTextEl.innerText = '아래 버튼을 누른 채로 말씀하세요';
+    });
+
+    downloadBtn.addEventListener('click', async () => {
+      const updatedUrl = await renderMergedImage(editInput.value);
+      triggerDownload(updatedUrl);
+      editModal.classList.remove('show');
+      voiceTextEl.innerText = '저장 완료! 다음 촬영을 준비하세요';
+    });
+  </script>
+</body>
+</html>
