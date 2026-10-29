@@ -252,5 +252,10 @@
       voiceTextEl.innerText = '저장 완료! 다음 촬영을 준비하세요';
     });
   </script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js');
+  }
+</script>
 </body>
 </html>
